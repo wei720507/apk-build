@@ -378,6 +378,16 @@ REMOTE_END = (
     "          )),\n          ),\n    );\n  }\n\n  Widget getRawPointerAndKeyBody(Widget child) {",
 )
 
+# 禁用会话「更多」菜单（含「切换方向」）：family 单向，任一侧点切换方向都会反转，
+# 故从根上让 showActions 直接 return，不再弹出任何菜单。两端通用。
+# 锚点 = remote_page.dart 的 `void showActions(String id) async {`（唯一）。
+REMOTE_ACTION_DISABLE = (
+    "  void showActions(String id) async {",
+    "  void showActions(String id) async {\n"
+    "    // [family] 单向定制：禁用「更多」菜单（含「切换方向」），防止误点反转方向\n"
+    "    return;",
+)
+
 # ---------------------------------------------------------------------------
 # 5) home_page.dart —— 老人端(elder)隐藏连接页/聊天页 + 引入 BindingStore
 # ---------------------------------------------------------------------------
@@ -508,7 +518,7 @@ if __name__ == "__main__":
     )
     patch(
         "flutter/lib/mobile/pages/remote_page.dart",
-        [REMOTE_IMPORT, REMOTE_INIT, REMOTE_BODY, REMOTE_END],
+        [REMOTE_IMPORT, REMOTE_INIT, REMOTE_BODY, REMOTE_END, REMOTE_ACTION_DISABLE],
     )
     patch(
         "flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt",

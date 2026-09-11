@@ -222,7 +222,24 @@ Future<void> _showHelperDialog(BuildContext context) async {
 /// 绑定/解绑后会随 [elderBindTick] 自动重建，无需手动 setState。
 /// 返回 Column：顶部一条状态条 + 原始远程画面。
 Widget helperBindingBanner(String id, Widget child) {
-  if (BindingStore.isElder) return child;
+  if (BindingStore.isElder) {
+    // 老人端被控：明确方向横幅，彻底消除"谁在控制谁"的视觉歧义
+    return Column(
+      children: [
+        Container(
+          width: double.infinity,
+          color: Colors.green.shade700,
+          padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 12),
+          child: const Text(
+            '🟢 正在被家人远程协助（你只需看着，请勿操作对方）',
+            style: TextStyle(
+                color: Colors.white, fontSize: 15, fontWeight: FontWeight.bold),
+          ),
+        ),
+        Expanded(child: child),
+      ],
+    );
+  }
 
   return Column(
     children: [
@@ -237,11 +254,11 @@ Widget helperBindingBanner(String id, Widget child) {
           final Color bg;
           final bool showConfirm;
           if (matched) {
-            text = '已绑定此老人机 ✓';
+            text = '🔵 你正在远程协助此老人机（你在控制）✓';
             bg = Colors.green.shade700;
             showConfirm = false;
           } else if (!hasBound) {
-            text = '未绑定（首次连接，请确认是您的家人）';
+            text = '🔵 你正在远程协助一台老人机（首次连接，请确认是您家人）';
             bg = Colors.orange.shade700;
             showConfirm = true;
           } else {
