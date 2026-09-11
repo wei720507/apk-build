@@ -277,21 +277,34 @@ class _ElderQRCodeState extends State<ElderQRCode> {
     return false;
   }
 
-  /// 构造二维码内容：RDCDIRECT|<稳定RustDesk ID>|<主用局域网地址>|pwd=<password>
+  /// 构造二维码内容：RDCDIRECT|<主用地址>|<备用地址>|pwd=<password>
   ///
-  /// v13 关键改动：把「稳定 ID」放在第一位。控制端扫码后 `connect(id)` 走的是与
-  /// 「远处ID」完全相同的 RustDesk 官方中转路径（hardconfig 清空 rendezvous 后自动
-  /// 回退官方服务器），因此：
-  ///   ① 扫码 = 输ID 一样稳，跨网络 / 移动数据都能连，不再依赖易变的局域网 IP；
-  ///   ② 方向唯一确定——只有控制端扫码发起，控制端永远控制方，老人端永不能发起。
-  /// （局域网地址作为第二位保留做兜底，但控制端一律用第一位 ID。）
+  /// v14 关键修正：只编**直连地址**，绝不编 ID。原因（实测踩坑）：
+  ///   - 编 ID → 控制端 `connect(id)` 必须走 RustDesk 官方协调/中继服务器；
+  ///     而官方服务器在中国**禁止"控制手机"类连接**（`Access to mobile devices is
+  ///     restricted in your country`），必被拒 → 扫码连不上。
+  ///   - 编地址（`192.168.0.x:21118` / `[2409:...]:21118`）→ 客户端判定为地址、
+  ///     走纯 P2P 直连，一个服务器都不碰，绝不报那个错，同 Wi-Fi / 跨网(公网IPv6)都通。
+  /// 地址排序：主用=局域网 IPv4（同 Wi-Fi 最快），备用=公网 IPv6（跨网络直连）。
   String _buildQrData(List<_Addr> cands) {
-    final id = gFFI.serverModel.serverId.value.text;
     final picks = <String>[];
-    if (id.isNotEmpty) picks.add(id); // 稳定 ID 优先（跨网络直连/中转）
+    // 1) 主用：局域网 IPv4
     for (final c in cands) {
-      if (picks.contains(c.addr)) continue;
-      picks.add(c.addr);
+      if (c.isLan && !c.isV6 && !picks.contains(c.addr)) {
+        picks.add(c.addr);
+        break;
+      }
+    }
+    // 2) 备用：公网 IPv6（跨网络直连）
+    for (final c in cands) {
+      if (c.isV6 && !c.isLan && !picks.contains(c.addr)) {
+        picks.add(c.addr);
+        if (picks.length >= 2) break;
+      }
+    }
+    // 3) 兜底：其余地址补齐到 2 个
+    for (final c in cands) {
+      if (!picks.contains(c.addr)) picks.add(c.addr);
       if (picks.length >= 2) break;
     }
     if (picks.isEmpty) return '';
@@ -323,6 +336,18 @@ class _ElderQRCodeState extends State<ElderQRCode> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            decoration: BoxDecoration(
+              color: Colors.blue.shade600,
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: const Text(
+              '老人端 · 被控（只能被家人协助）',
+              style: TextStyle(fontSize: 14, color: Colors.white, fontWeight: FontWeight.bold),
+            ),
+          ),
+          const SizedBox(height: 10),
           const Text(
             '家人扫码即可直连',
             style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
