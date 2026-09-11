@@ -1,0 +1,407 @@
+name: Build Elder/Helper APKs
+
+# 触发：手动按钮(workflow_dispatch) 或 打 tag(v*) 时自动出包
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+# 不填任何 Secret 也能出包 —— 用自动生成的 keystore 签名，手机可正常安装。
+# 如需用自己的签名密钥，可填 ANDROID_SIGNING_KEY / KEY_ALIAS / KEY_STORE_PASSWORD / KEY_PASSWORD。
+#
+# 架构说明（解决单 job 磁盘爆满问题，对齐 RustDesk 官方）：
+#   1) generate-bridge : 生成 flutter_rust_bridge 的 generated_bridge.dart（一次性）
+#   2) build-core      : matrix 按架构分 runner，每个只编一个架构的 .so（仅占一份空间）
+#   3) build-apks      : 下载所有 .so + bridge，应用定制层，分别打 老人端/老板端 APK
+
+env:
+  FLUTTER_VERSION: "3.24.5"
+  NDK_VERSION: "r27c"
+  CARGO_NDK_VERSION: "3.1.2"
+  FLUTTER_RUST_BRIDGE_VERSION: "1.80.1"
+  CARGO_EXPAND_VERSION: "1.0.95"
+  RUST_VERSION: "stable"
+  VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
+  RUSTDESK_REF: "master"
+  BUILD_TOOLS: "34.0.0"
+  ANDROID_API: "34"
+  VCPKG_ROOT: "/opt/vcpkg"
+
+jobs:
+  generate-bridge:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Free Disk Space (Ubuntu)
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: false
+          android: false
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: false
+
+      - name: Checkout RustDesk 源码(锁定版本)
+        uses: actions/checkout@v4
+        with:
+          repository: rustdesk/rustdesk
+          ref: ${{ env.RUSTDESK_REF }}
+          submodules: recursive
+          path: rustdesk
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+               build-essential clang cmake curl git g++ \
+               gcc-multilib g++-multilib libc6-dev \
+               libclang-dev llvm-dev nasm ninja-build pkg-config wget
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Flutter ${{ env.FLUTTER_VERSION }}
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+
+      - name: Patch flutter
+        run: |
+          cd $(dirname $(dirname $(which flutter)))
+          if [[ "3.24.5" == ${{ env.FLUTTER_VERSION }} ]]; then
+            git apply ${{ github.workspace }}/rustdesk/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff || true
+          fi
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: x86_64-unknown-linux-gnu
+
+      - name: 生成 flutter_rust_bridge (generated_bridge.dart)
+        run: |
+          rustup target add x86_64-unknown-linux-gnu || true
+          cargo install cargo-expand --version ${{ env.CARGO_EXPAND_VERSION }} --locked
+          cargo install flutter_rust_bridge_codegen --version ${{ env.FLUTTER_RUST_BRIDGE_VERSION }} --features "uuid" --locked
+          cd ${{ github.workspace }}/rustdesk/flutter
+          flutter pub get
+          cd ${{ github.workspace }}/rustdesk
+          ~/.cargo/bin/flutter_rust_bridge_codegen \
+            --rust-input ./src/flutter_ffi.rs \
+            --dart-output ./flutter/lib/generated_bridge.dart
+
+      - name: Stage bridge (保留 rustdesk/ 前缀，避免 upload-artifact 的 LCA 去掉前缀导致下载错位)
+        run: |
+          mkdir -p staging/rustdesk/src staging/rustdesk/flutter/lib
+          # 通配复制所有 bridge_generated*.rs：codegen 会把 io/stream/async 等模块拆成
+          # bridge_generated.io.rs / .stream.rs 等子文件，主文件里用 `mod io;` 引用，必须全部带上
+          cp ${{ github.workspace }}/rustdesk/src/bridge_generated*.rs staging/rustdesk/src/
+          # 通配复制所有 generated_bridge*.dart：codegen 的 build_runner 还会生成
+          # generated_bridge.freezed.dart（以及可能的 .g.dart），generated_bridge.dart 里
+          # 用 `part 'generated_bridge.freezed.dart';` 引用，必须一并带上，否则 model.dart 等报类型缺失
+          cp ${{ github.workspace }}/rustdesk/flutter/lib/generated_bridge*.dart staging/rustdesk/flutter/lib/
+
+      - name: Upload bridge artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bridge
+          path: staging
+
+  build-core:
+    needs: generate-bridge
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64-v8a
+            target: aarch64-linux-android
+            ndk_script: ndk_arm64.sh
+          - arch: armeabi-v7a
+            target: armv7-linux-androideabi
+            ndk_script: ndk_arm.sh
+    steps:
+      - name: Free Disk Space (Ubuntu)
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: false
+          android: false
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: false
+
+      - name: Checkout RustDesk 源码(锁定版本)
+        uses: actions/checkout@v4
+        with:
+          repository: rustdesk/rustdesk
+          ref: ${{ env.RUSTDESK_REF }}
+          submodules: recursive
+          path: rustdesk
+
+      - name: 清理 .git 释放磁盘空间
+        run: sudo rm -rf ${{ github.workspace }}/rustdesk/.git
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+               build-essential clang cmake curl git g++ \
+               gcc-multilib g++-multilib libc6-dev \
+               libclang-dev llvm-dev nasm ninja-build pkg-config wget
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android NDK ${{ env.NDK_VERSION }}
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+          add-to-path: true
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Install build-tools & platform
+        run: |
+          yes | sdkmanager "build-tools;${{ env.BUILD_TOOLS }}" "platforms;android-${{ env.ANDROID_API }}"
+          yes | sdkmanager --licenses || true
+
+      - name: Setup vcpkg + 安装本架构原生依赖
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          VCPKG_ROOT: ${{ env.VCPKG_ROOT }}
+        run: |
+          git clone https://github.com/microsoft/vcpkg /opt/vcpkg
+          cd /opt/vcpkg && git reset --hard ${{ env.VCPKG_COMMIT_ID }} && ./bootstrap-vcpkg.sh
+
+      - name: Install Rust toolchain + cargo-ndk (${{ matrix.target }})
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.target }}
+
+      - name: Download bridge (Rust侧 src/bridge_generated.rs 供编 .so 用)
+        uses: actions/download-artifact@v4
+        with:
+          name: bridge
+          path: ${{ github.workspace }}
+
+      - name: Build Rust core (.so) for ${{ matrix.arch }}
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+          VCPKG_ROOT: ${{ env.VCPKG_ROOT }}
+        run: |
+          cd ${{ github.workspace }}/rustdesk
+          cargo install cargo-ndk --version ${{ env.CARGO_NDK_VERSION }} --locked
+          ./flutter/build_android_deps.sh ${{ matrix.arch }}
+          ./flutter/${{ matrix.ndk_script }}
+
+      - name: Stage .so for upload
+        run: |
+          mkdir -p upload/${{ matrix.target }}
+          cp ${{ github.workspace }}/rustdesk/target/${{ matrix.target }}/release/liblibrustdesk.so upload/${{ matrix.target }}/liblibrustdesk.so
+
+      - name: Upload .so artifact (${{ matrix.arch }})
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-${{ matrix.target }}
+          path: upload/${{ matrix.target }}
+
+  build-apks:
+    needs: [generate-bridge, build-core]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Free Disk Space (Ubuntu)
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: false
+          android: false
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: false
+
+      - name: Checkout 本仓库(定制层)
+        uses: actions/checkout@v4
+        with:
+          path: self
+
+      - name: Checkout RustDesk 源码(锁定版本)
+        uses: actions/checkout@v4
+        with:
+          repository: rustdesk/rustdesk
+          ref: ${{ env.RUSTDESK_REF }}
+          submodules: recursive
+          path: rustdesk
+
+      - name: 清理 .git 释放磁盘空间
+        run: sudo rm -rf ${{ github.workspace }}/rustdesk/.git ${{ github.workspace }}/self/.git
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+               build-essential clang cmake curl git g++ \
+               gcc-multilib g++-multilib libc6-dev \
+               libclang-dev llvm-dev nasm ninja-build pkg-config wget
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Flutter ${{ env.FLUTTER_VERSION }}
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+
+      - name: Patch flutter
+        run: |
+          cd $(dirname $(dirname $(which flutter)))
+          if [[ "3.24.5" == ${{ env.FLUTTER_VERSION }} ]]; then
+            git apply ${{ github.workspace }}/rustdesk/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff || true
+          fi
+
+      - name: Set up Android NDK ${{ env.NDK_VERSION }}
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+          add-to-path: true
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Install build-tools & platform
+        run: |
+          yes | sdkmanager "build-tools;${{ env.BUILD_TOOLS }}" "platforms;android-${{ env.ANDROID_API }}"
+          yes | sdkmanager --licenses || true
+
+      - name: Download bridge (generated_bridge.dart)
+        uses: actions/download-artifact@v4
+        with:
+          name: bridge
+          path: ${{ github.workspace }}
+
+      - name: Download Rust core (.so) artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: core-*
+          path: ${{ github.workspace }}/_cores
+
+      - name: 放置 .so 到 jniLibs 并补齐 libc++_shared.so
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          cd ${{ github.workspace }}/rustdesk/flutter
+          mkdir -p android/app/src/main/jniLibs/arm64-v8a
+          cp ${{ github.workspace }}/_cores/core-aarch64-linux-android/liblibrustdesk.so android/app/src/main/jniLibs/arm64-v8a/librustdesk.so
+          cp ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so android/app/src/main/jniLibs/arm64-v8a/
+          mkdir -p android/app/src/main/jniLibs/armeabi-v7a
+          cp ${{ github.workspace }}/_cores/core-armv7-linux-androideabi/liblibrustdesk.so android/app/src/main/jniLibs/armeabi-v7a/librustdesk.so
+          cp ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/arm-linux-androideabi/libc++_shared.so android/app/src/main/jniLibs/armeabi-v7a/
+
+      - name: 应用定制层(复制定制 Dart + 注入补丁)
+        run: |
+          cd ${{ github.workspace }}/rustdesk
+          mkdir -p flutter/lib/custom
+          cp ${{ github.workspace }}/self/customization/flutter/lib/custom/*.dart flutter/lib/custom/
+          python3 ${{ github.workspace }}/self/customization/apply_overlay.py ${{ github.workspace }}/rustdesk
+
+      - name: 准备签名 keystore（有密钥则用密钥，否则自动生成）
+        env:
+          ANDROID_SIGNING_KEY: ${{ secrets.ANDROID_SIGNING_KEY }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          cd ${{ github.workspace }}/rustdesk/flutter
+          STORE="$HOME/family-release-key.jks"
+          ALIAS="${KEY_ALIAS:-familyremote}"
+          SP="${KEY_STORE_PASSWORD:-familyremote123}"
+          KP="${KEY_PASSWORD:-familyremote123}"
+          if [ -n "$ANDROID_SIGNING_KEY" ]; then
+            echo "使用仓库密钥(ANDROID_SIGNING_KEY)签名"
+            echo "$ANDROID_SIGNING_KEY" | base64 -d > "$STORE"
+          else
+            echo "未配置密钥，使用自动生成的 keystore 签名（可正常安装）"
+            keytool -genkey -v -keystore "$STORE" -keyalg RSA -keysize 2048 \
+              -validity 10000 -alias "$ALIAS" \
+              -storepass "$SP" -keypass "$KP" \
+              -dname "CN=FamilyRemote, OU=Family, O=Family, C=CN"
+          fi
+          {
+            echo "storePassword=$SP"
+            echo "keyPassword=$KP"
+            echo "keyAlias=$ALIAS"
+            echo "storeFile=$STORE"
+          } > android/key.properties
+          sed -i "s/org.gradle.jvmargs=-Xmx1024M/org.gradle.jvmargs=-Xmx2g/g" ./android/gradle.properties
+          # 把签名参数暴露给后续步骤（apksigner 用）
+          {
+            echo "KS_PATH=$STORE"
+            echo "KS_ALIAS=$ALIAS"
+            echo "KS_STORE_PASS=$SP"
+            echo "KS_KEY_PASS=$KP"
+          } >> "$GITHUB_ENV"
+
+      - name: Build APK (role=elder)
+        run: |
+          cd ${{ github.workspace }}/rustdesk/flutter
+          flutter pub get
+          flutter build apk --release --target-platform android-arm,android-arm64 --dart-define=ROLE=elder
+          mv build/app/outputs/flutter-apk/app-release.apk ${{ github.workspace }}/family-remote-elder-unsigned.apk
+
+      - name: Build APK (role=helper)
+        run: |
+          cd ${{ github.workspace }}/rustdesk/flutter
+          flutter build apk --release --target-platform android-arm,android-arm64 --dart-define=ROLE=helper
+          mv build/app/outputs/flutter-apk/app-release.apk ${{ github.workspace }}/family-remote-helper-unsigned.apk
+
+      - name: 对 APK 签名 (apksigner)
+        run: |
+          cd ${{ github.workspace }}
+          APKSIGNER="${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools/${{ env.BUILD_TOOLS }}/apksigner"
+          if [ ! -x "$APKSIGNER" ]; then
+            APKSIGNER="/usr/local/lib/android/sdk/build-tools/${{ env.BUILD_TOOLS }}/apksigner"
+          fi
+          echo "使用 apksigner: $APKSIGNER"
+          if [ ! -x "$APKSIGNER" ]; then
+            echo "::error::未找到 apksigner，签名失败"; exit 1
+          fi
+          for f in family-remote-elder-unsigned.apk family-remote-helper-unsigned.apk; do
+            [ -f "$f" ] || { echo "::error::找不到 $f"; exit 1; }
+            out="${f/-unsigned/}"
+            "$APKSIGNER" sign --ks "$KS_PATH" --ks-key-alias "$KS_ALIAS" \
+              --ks-pass pass:"$KS_STORE_PASS" --key-pass pass:"$KS_KEY_PASS" \
+              --out "$out" "$f"
+            "$APKSIGNER" verify "$out" && echo "已签名并校验通过: $out"
+          done
+
+      - name: 重命名为中文名（便于区分两个 APK）
+        run: |
+          cd ${{ github.workspace }}
+          mv family-remote-elder.apk 老人端.apk
+          mv family-remote-helper.apk 协助端.apk
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: family-remote-apks
+          path: |
+            ${{ github.workspace }}/老人端.apk
+            ${{ github.workspace }}/协助端.apk
