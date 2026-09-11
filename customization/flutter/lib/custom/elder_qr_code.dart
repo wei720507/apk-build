@@ -31,6 +31,7 @@ import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/models/platform_model.dart' as pm;
 import 'package:flutter_hbb/custom/secure_binding.dart';
 import 'package:flutter_hbb/custom/hardconfig.dart';
+import 'package:flutter/services.dart';
 
 /// 候选地址：接口名 + 地址 + 优先级 + 是否局域网 + 可读说明
 class _Addr {
@@ -52,9 +53,13 @@ class ElderQRCode extends StatefulWidget {
   State<ElderQRCode> createState() => _ElderQRCodeState();
 }
 
-class _ElderQRCodeState extends State<ElderQRCode> {
+class _ElderQRCodeState extends State<ElderQRCode> with WidgetsBindingObserver {
   List<_Addr> _candidates = [];
   bool _loading = true;
+
+  // 输入控制（无障碍 RustDesk Input）状态 —— 协助机能否触控老人的关键
+  bool? _inputEnabled;
+  Timer? _inputTimer;
 
   // 直连监听诊断
   String _directServer = '';
@@ -73,6 +78,8 @@ class _ElderQRCodeState extends State<ElderQRCode> {
   @override
   void initState() {
     super.initState();
+    _checkInput();
+    WidgetsBinding.instance.addObserver(this);
     _refresh();
     // 首帧之后再启动服务：startService() 会 notifyListeners()，
     // 在 build 阶段调用会触发 "markNeedsBuild during build"。
@@ -85,7 +92,34 @@ class _ElderQRCodeState extends State<ElderQRCode> {
   @override
   void dispose() {
     _timer?.cancel();
+    _inputTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _checkInput();
+  }
+
+  Future<void> _checkInput() async {
+    try {
+      final r = await const MethodChannel('mChannel').invokeMethod('get_input_control_enabled');
+      if (mounted) setState(() => _inputEnabled = r == true);
+    } catch (_) {
+      if (mounted) setState(() => _inputEnabled = false);
+    }
+  }
+
+  Future<void> _openInputSettings() async {
+    try {
+      await const MethodChannel('mChannel').invokeMethod('open_accessibility_settings');
+    } catch (_) {}
+    _inputTimer?.cancel();
+    _inputTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
+      await _checkInput();
+      if (_inputEnabled == true) _inputTimer?.cancel();
+    });
   }
 
   /// 启动「屏幕共享服务」（= 首页那个「启动服务」按钮）。
@@ -450,6 +484,55 @@ class _ElderQRCodeState extends State<ElderQRCode> {
               ],
             ),
           ),
+
+      // ── 输入控制状态（协助机能否触控老人的关键）────────────
+      Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: _inputEnabled == true
+              ? Colors.green.withAlpha(20)
+              : Colors.orange.withAlpha(22),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              _inputEnabled == true
+                  ? '✅ 输入控制已开启 → 协助机可以触控您的手机'
+                  : (_inputEnabled == false
+                      ? '⚠️ 输入控制未开启 → 协助机只能看、不能动'
+                      : '⌛ 正在检测输入控制状态…'),
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.bold,
+                color: _inputEnabled == true
+                    ? Colors.green.shade700
+                    : Colors.orange.shade800,
+              ),
+            ),
+            if (_inputEnabled != true) ...[
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: _openInputSettings,
+                  icon: const Icon(Icons.touch_app),
+                  label: const Text('去开启输入控制（系统设置 → 无障碍 → RustDesk Input）'),
+                ),
+              ),
+              const SizedBox(height: 6),
+              const Text(
+                '开启后本页会自动变绿；若开关点不开，是手机“受限设置”拦截：长按本 App 图标→应用信息→右上角 ⋮ → 授予受限权限，再回来开启',
+                style: TextStyle(fontSize: 11, color: Colors.grey),
+              ),
+            ],
+          ],
+        ),
+      ),
+
+      const SizedBox(height: 10),
 
           // 未监听时给一个明显的手动启动入口（老人/家人一键点）
           if (!_portListening) ...[

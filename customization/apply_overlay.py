@@ -292,6 +292,19 @@ ACT_BRANCH = (
     "                \"stop_control_notification\" -> {\n"
     "                    mainService?.stopControlNotification()\n"
     "                    result.success(null)\n"
+    "                }\n"
+    "                \"get_input_control_enabled\" -> {\n"
+    "                    val expected = \"com.carriez.flutter_hbb/com.carriez.flutter_hbb.InputService\"\n"
+    "                    val s = android.provider.Settings.Secure.getString(contentResolver, android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: \"\"\n"
+    "                    result.success(s.split(\":\").contains(expected))\n"
+    "                }\n"
+    "                \"open_accessibility_settings\" -> {\n"
+    "                    try {\n"
+    "                        val intent = Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)\n"
+    "                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)\n"
+    "                        startActivity(intent)\n"
+    "                        result.success(true)\n"
+    "                    } catch (e: Exception) { result.success(false) }\n"
     "                }",
 )
 
