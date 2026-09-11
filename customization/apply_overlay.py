@@ -185,9 +185,9 @@ SERVER_MODEL_REMOVE = (
 # 于是老人端也能变成「控制方」，这正是「方向搞反 / 老人机控制了协助机」的根因之一。
 # 扫码发起连接的能力只保留给协助端。
 SETTINGS_SCAN_GATE = (
-    "    final appBarActions = bind.isDisableSettings() ? [] : [ScanButton()];",
-    "    final appBarActions = (bind.isDisableSettings() || BindingStore.isElder)\n"
-    "        ? [] : [ScanButton()];",
+    "  final appBarActions = bind.isDisableSettings() ? [] : [ScanButton()];",
+    "  final appBarActions = (bind.isDisableSettings() || BindingStore.isElder)\n"
+    "      ? [] : [ScanButton()];",
 )
 
 # ---------------------------------------------------------------------------
